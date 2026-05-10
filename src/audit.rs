@@ -1,4 +1,5 @@
-use winlog::{event_log, Level};
+use winlog; 
+use log::Level; // Fixes E0603 [cite: 39]
 
 pub struct AuditGuard {
     source: String,
@@ -13,7 +14,7 @@ impl AuditGuard {
 
     pub fn log(&self, level: Level, event_id: u32, message: &str) {
         // Log to Windows Event Viewer under 'Application'
-        event_log(&self.source, level, event_id, &[message]);
+        winlog::event_log(&self.source, level, event_id, &[message]);
     }
 }
 
