@@ -20,7 +20,7 @@ rand = "0.10"
 rustls = { version = "0.23", features = ["aws_lc_rs"] }
 tokio-rustls = "0.26"
 webpki-roots = "0.26"
-reqwest = { version = "0.13", default-features = false, features = ["rustls-tls-manual-roots", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 
 # Log-Structured Persistence
 iggy = "0.10"
