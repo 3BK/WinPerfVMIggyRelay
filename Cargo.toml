@@ -1,37 +1,44 @@
-## Template 
-
 [package]
 name = "vm-iggy-relay"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
+authors = ["Security Engineering"]
 
 [dependencies]
-# Async & Networking
+# Async Runtime & Core
 tokio = { version = "1.40", features = ["full"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-manual-roots"] }
-rustls = { version = "0.23", features = ["ring"] }
-webpki-roots = "0.26"
+tracing = "0.1"
+tracing-subscriber = "0.3"
 
-# Windows Native & IPC
+# Serialization & Config
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+hex = "0.4"
+rand = "0.8"
+
+# Security & TLS (Static rustls)
+rustls = { version = "0.23", features = ["ring"] }
+tokio-rustls = "0.26"
+webpki-roots = "0.26"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-manual-roots"] }
+
+# Persistence
+iggy = "0.4"
+
+# Windows Integration
 windows-service = "0.7"
+winlog = "0.3"
+widestring = "0.5"
 windows-sys = { version = "0.52", features = [
     "Win32_Security_Cryptography",
     "Win32_Foundation",
     "Win32_System_SystemServices",
     "Win32_System_EventLog"
 ] }
-winlog = "0.3" # Native Event Log wrapper
-
-# Safety & Compliance
-serde = { version = "1.0", features = ["derive"] }
-toml = "0.8"
-hex = "0.4"
-rand = "0.8"
-iggy = "0.4"
-tracing = "0.1"
-tracing-subscriber = "0.3"
 
 [profile.release]
-strip = true
-lto = true
-panic = "abort"
+strip = true          # NIST STIG: Remove symbols for hardening
+lto = true            # Link-time optimization
+panic = "abort"       # CIS: Disable unwinding to prevent info leaks
+opt-level = "z"       # Optimize for size/security
+codegen-units = 1
