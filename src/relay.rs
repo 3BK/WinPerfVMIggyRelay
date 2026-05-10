@@ -3,6 +3,7 @@ use crate::audit::AuditGuard;
 use iggy::client::MessageClient;
 use iggy::messages::send_messages::{Message as IggyMsg, SendMessages};
 use iggy::identifier::Identifier;
+use rand::Rng;
 use winlog::Level;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
