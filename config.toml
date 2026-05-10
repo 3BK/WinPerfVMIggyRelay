@@ -1,0 +1,17 @@
+named_pipe_path = "\\\\.\\pipe\\vmetrics_relay"
+iggy_stream_id = 100
+iggy_topic_id = 1
+pingora_url = "https://metrics-proxy.internal:8443/api/v1/import"
+
+# Security Offsets
+client_cert_sha1 = "a94a8fe5ccb19b61c4c61d4a483a9ab5224c13d2"
+server_sha256_pin = "6f9a3c316744040a454d454a88941785f83863776a3e6f988849b233a0279883"
+
+# Audit Configuration
+audit_source_name = "VmIggyRelayAudit"
+log_level = "Info" # Debug, Info, Warning, Error
+
+# Jitter & Backoff
+base_backoff_ms = 500
+max_backoff_ms = 30000
+max_jitter_ms = 2000
