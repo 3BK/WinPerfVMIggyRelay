@@ -13,9 +13,6 @@ use iggy::identifier::Identifier;
 
 use rand::Rng;
 use winlog::Level;
-use std::time::Duration;
-use tokio::io::AsyncReadExt;
-use tokio::net::windows::named_pipe::ServerOptions;
 
 pub async fn run_ingestion(pipe_path: String, s_id: u32, t_id: u32, client: impl Client, audit: Arc<AuditGuard>) {
     let mut server = ServerOptions::new().first_pipe_instance(true).create(&pipe_path).unwrap();
