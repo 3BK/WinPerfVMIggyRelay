@@ -40,7 +40,12 @@ async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
     let items: Keyspace = fjall_db.keyspace("metrics", Default::default())?;
 
     // 2. Setup Hardened TLS Client
-    let rustls_cfg = tls::build_rustls_config(&cfg.tls.client_cert_sha1);
+    let rustls_cfg = tls::build_rustls_config(
+        &cfg.tls.client_cert_sha256,
+        &cfg.tls.server_sha256_pin,
+        &audit
+    );
+
     let http_client = reqwest::Client::builder()
         .use_preconfigured_tls(rustls_cfg)
         .build()?;
