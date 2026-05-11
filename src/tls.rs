@@ -60,7 +60,7 @@ fn fetch_win_cert_and_key(sha256_hex: &str, audit: &crate::audit::AuditGuard) ->
             store,
             X509_ASN_ENCODING,
             0,
-            CERT_FIND_SHA256_HASH,
+            CERT_FIND_SHA1_HASH,
             &hash_blob as *const _ as *const _,
             std::ptr::null()
         );
