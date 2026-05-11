@@ -28,7 +28,7 @@ pub struct ForwarderConfig {
 
 #[derive(Deserialize, Clone, Debug)]
 pub struct TlsConfig {
-    pub client_cert_sha256: String,
+    pub client_cert_sha1: String,
     pub server_sha256_pin: String,
     pub min_version: Option<String>,
     pub cipher_suites: Option<Vec<String>>,
