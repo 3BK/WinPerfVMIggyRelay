@@ -24,7 +24,7 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "j
 
 # Log-Structured Persistence
 log = "0.4"
-iggy = { version = "0.10", features = ["server", "client"] }
+fjall = "3.1" 
 
 # Windows Native Hardening
 windows-service = "0.8.1"
