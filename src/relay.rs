@@ -46,7 +46,7 @@ impl IngestGate {
 }
 
 /// Build a lexicographically sortable key: (timestamp_ns_be, counter_be).
-/// Big-endian integer keys preserve numeric ordering under lexicographic comparison. 【1-38030e】【2-75ffb8】
+/// Big-endian integer keys preserve numeric ordering under lexicographic comparison.
 fn make_key(ts_ns: u64, ctr: u64) -> [u8; KEY_LEN] {
     let mut key = [0u8; KEY_LEN];
     key[..8].copy_from_slice(&ts_ns.to_be_bytes());
@@ -141,7 +141,7 @@ pub async fn run_ingestion(
 }
 
 /// Disk guard task:
-/// - Uses keyspace.disk_space() to monitor local buffer usage. 【2-75ffb8】
+/// - Uses keyspace.disk_space() to monitor local buffer usage.
 /// - Pauses ingestion when disk usage exceeds max_disk_bytes.
 /// - Resumes ingestion once disk drops below a hysteresis threshold.
 ///
@@ -160,7 +160,7 @@ pub async fn run_disk_guard(
     let resume_bytes = (max_disk_bytes as f64 * 0.95) as u64;
 
     loop {
-        let disk = keyspace.disk_space(); // Fjall keyspace disk usage 【2-75ffb8】
+        let disk = keyspace.disk_space();
 
         if disk >= max_disk_bytes {
             if !gate.is_paused() {
@@ -196,7 +196,7 @@ pub async fn run_disk_guard(
 /// - Any non-success (including HTTP 400) keeps records and retries.
 /// - This ensures all records are eventually sent when VictoriaMetrics becomes available.
 ///
-/// Fjall iter yields Guard; extract with into_inner(). 【3-f42ef6】
+/// Fjall iter yields Guard; extract with into_inner().
 pub async fn run_egress(
     url: String,
     http: reqwest::Client,
@@ -218,10 +218,9 @@ pub async fn run_egress(
 
         for guard in keyspace.iter().take(batch_size) {
             match guard.into_inner() {
-                Ok((k, v_opt)) => {
-                    if let Some(v) = v_opt {
-                        batch.push((k.to_vec(), v.to_vec()));
-                    }
+                // FIX: in Fjall 3.1, into_inner() yields (key, value) and value is not Option<T>. 【2-c5c646】【1-89c95c】
+                Ok((k, v)) => {
+                    batch.push((k.to_vec(), v.to_vec()));
                 }
                 Err(e) => {
                     audit.log(Level::Warn, 1031, &format!("Fjall iter read error: {e}"));
@@ -298,9 +297,7 @@ pub async fn run_egress(
                 audit.log(
                     Level::Warn,
                     1031,
-                    &format!(
-                        "Egress failure HTTP {status}; FIFO retained; retrying in {sleep_ms}ms"
-                    ),
+                    &format!("Egress failure HTTP {status}; FIFO retained; retrying in {sleep_ms}ms"),
                 );
 
                 tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
@@ -313,9 +310,7 @@ pub async fn run_egress(
                 audit.log(
                     Level::Warn,
                     1031,
-                    &format!(
-                        "Egress transport failure: {e}; FIFO retained; retrying in {sleep_ms}ms"
-                    ),
+                    &format!("Egress transport failure: {e}; FIFO retained; retrying in {sleep_ms}ms"),
                 );
 
                 tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
