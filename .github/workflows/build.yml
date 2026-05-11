@@ -6,6 +6,9 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      CARGO_TERM_COLOR: always
+    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -13,6 +16,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.90.0"
           targets: x86_64-pc-windows-msvc
 
       - name: Build Release
