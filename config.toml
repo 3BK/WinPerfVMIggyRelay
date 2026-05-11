@@ -28,7 +28,7 @@ idle_timeout_seconds = 90
 max_idle_connections = 2
 
 [tls]
-client_cert_sha256 = "a94a8fe5ccb19b61c4c61d4a483a9ab5224c13d2a94a8fe5ccb19b61c4c61d4a483a9ab5224c13d2"
+client_cert_sha1 = "<sha1 hash>"
 server_sha256_pin = "6f9a3c316744040a454d454a88941785f83863776a3e6f988849b233a0279883"
 min_version = "1.2"
 cipher_suites = [
