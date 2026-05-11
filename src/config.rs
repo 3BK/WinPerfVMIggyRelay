@@ -4,8 +4,7 @@ use std::fs;
 #[derive(Deserialize, Clone, Debug)]
 pub struct RelayConfig {
     pub named_pipe_path: String,
-    pub iggy_stream_id: u32,
-    pub iggy_topic_id: u32,
+    pub metrics_queue: String,
     pub pingora_url: String,
     pub client_cert_sha1: String,
     pub server_sha256_pin: String,
