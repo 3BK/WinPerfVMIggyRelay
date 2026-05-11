@@ -11,6 +11,7 @@ use fjall::PartitionHandle;
 
 // Randomness & Logging
 use rand::Rng;
+use rand::RngExt;
 use log::Level;
 
 /// Ingests data from a Windows Named Pipe and persists it into a Fjall LSM-tree partition.
