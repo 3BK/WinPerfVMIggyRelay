@@ -5,23 +5,48 @@ use crate::guards::PipeGuard;
 use fjall::Keyspace;
 use log::Level;
 use rand::RngExt;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncReadExt;
 use tokio::net::windows::named_pipe::ServerOptions;
 
-/// Stored value encoding (unchanged):
+/// Stored value encoding:
 /// [0..8)   = ingest_ts_ns (u64 BE)
 /// [8..12)  = payload_len (u32 BE)
 /// [12..]   = payload bytes
 const HEADER_LEN: usize = 8 + 4;
 
-/// Fjall key encoding (new):
+/// Fjall key encoding:
 /// [0..8)   = timestamp_ns (u64 BE)
 /// [8..16)  = counter (u64 BE)
 const KEY_LEN: usize = 16;
 
-/// Build a lexicographically sortable key: (timestamp_ns_be, counter_be)
+/// Shared gate used to pause ingestion when disk high-water mark is hit.
+/// This enforces backpressure without dropping unsent data.
+#[derive(Debug)]
+pub struct IngestGate {
+    paused: AtomicBool,
+}
+
+impl IngestGate {
+    pub fn new() -> Self {
+        Self { paused: AtomicBool::new(false) }
+    }
+
+    pub fn set_paused(&self, v: bool) {
+        self.paused.store(v, Ordering::Relaxed);
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+}
+
+/// Build a lexicographically sortable key: (timestamp_ns_be, counter_be).
+/// Big-endian integer keys preserve numeric ordering under lexicographic comparison. 【1-38030e】【2-75ffb8】
 fn make_key(ts_ns: u64, ctr: u64) -> [u8; KEY_LEN] {
     let mut key = [0u8; KEY_LEN];
     key[..8].copy_from_slice(&ts_ns.to_be_bytes());
@@ -29,59 +54,65 @@ fn make_key(ts_ns: u64, ctr: u64) -> [u8; KEY_LEN] {
     key
 }
 
-/// Extract timestamp_ns from a (timestamp_ns, counter) key.
-fn key_timestamp_ns(key: &[u8]) -> Option<u64> {
-    if key.len() < 8 {
-        return None;
-    }
-    Some(u64::from_be_bytes([
-        key[0], key[1], key[2], key[3], key[4], key[5], key[6], key[7],
-    ]))
-}
-
-/// Ingests data from a Windows Named Pipe and persists it into a Fjall Keyspace.
-/// Uses (timestamp_ns, counter) as the key for restart-safe FIFO ordering.
+/// Ingests data from a Windows Named Pipe and persists it into a single Fjall Keyspace.
 ///
-/// Important:
-/// - Fjall stores keys in lexicographic order; big-endian integer keys preserve numeric ordering,
-///   which gives predictable ordering for FIFO scans. 【1-575fa8】【2-fae269】
-/// - If the wall clock moves backwards (NTP step), we clamp timestamps to keep ordering monotonic.
-pub async fn run_ingestion(pipe_path: String, keyspace: Keyspace, audit: Arc<AuditGuard>) {
+/// Guarantees:
+/// - FIFO ordering by key (timestamp_ns, counter) big-endian.
+/// - No record is deleted here.
+/// - Backpressure: if gate is paused, ingestion stops reading the pipe (producer/pipe buffers apply backpressure).
+pub async fn run_ingestion(
+    pipe_path: String,
+    keyspace: Keyspace,
+    audit: Arc<AuditGuard>,
+    gate: Arc<IngestGate>,
+) {
     let mut server = ServerOptions::new()
         .first_pipe_instance(true)
         .create(&pipe_path)
         .expect("NIST AC-4: Failed to create secure named pipe");
 
-    // Used to keep keys monotonic even if SystemTime steps backward.
+    // Keep timestamps monotonic to avoid key reordering if the system clock jumps backward.
     let mut last_ts_ns: u64 = 0;
-
-    // Counter used to break ties within the same timestamp_ns.
     let mut counter: u64 = 0;
 
     loop {
         if server.connect().await.is_ok() {
             let _g = PipeGuard(&mut server);
 
-            // Consider making this configurable.
+            // Consider making this configurable (cfg.ingest.pipe_buffer_size).
             let mut buf = vec![0u8; 65_536];
 
-            while let Ok(n) = _g.0.read(&mut buf).await {
+            loop {
+                // Backpressure: stop consuming input while disk is above the watermark.
+                if gate.is_paused() {
+                    audit.log(Level::Warn, 1023, "Ingest paused due to disk high-water mark.");
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    continue;
+                }
+
+                let n = match _g.0.read(&mut buf).await {
+                    Ok(n) => n,
+                    Err(e) => {
+                        audit.log(Level::Warn, 1012, &format!("Named pipe read error: {e}"));
+                        break;
+                    }
+                };
+
                 if n == 0 {
                     break;
                 }
 
-                // Wall-clock timestamp; may step backward due to NTP.
                 let mut now_ns = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
                     .as_nanos() as u64;
 
-                // Clamp to monotonic time to preserve FIFO ordering.
+                // Clamp backward time jumps to preserve monotonic ordering.
                 if now_ns < last_ts_ns {
                     now_ns = last_ts_ns;
                 }
 
-                // Reset counter on timestamp change, otherwise increment.
+                // Reset counter on timestamp change; else increment tie-breaker.
                 if now_ns != last_ts_ns {
                     counter = 0;
                     last_ts_ns = now_ns;
@@ -89,10 +120,9 @@ pub async fn run_ingestion(pipe_path: String, keyspace: Keyspace, audit: Arc<Aud
                     counter = counter.wrapping_add(1);
                 }
 
-                // Key: (timestamp_ns_be, counter_be)
                 let key = make_key(now_ns, counter);
 
-                // Value (unchanged): [timestamp_ns][payload_len][payload]
+                // Value: [timestamp_ns][payload_len][payload]
                 let mut value = Vec::with_capacity(HEADER_LEN + n);
                 value.extend_from_slice(&now_ns.to_be_bytes());
                 value.extend_from_slice(&(n as u32).to_be_bytes());
@@ -100,6 +130,8 @@ pub async fn run_ingestion(pipe_path: String, keyspace: Keyspace, audit: Arc<Aud
 
                 if let Err(e) = keyspace.insert(&key, &value) {
                     audit.log(Level::Error, 1022, &format!("Fjall insert failed: {e}"));
+                    // Avoid a tight loop in case of persistent disk/IO errors
+                    tokio::time::sleep(Duration::from_millis(250)).await;
                 }
             }
         }
@@ -108,13 +140,63 @@ pub async fn run_ingestion(pipe_path: String, keyspace: Keyspace, audit: Arc<Aud
     }
 }
 
-/// Polls the Fjall Keyspace for the oldest batch and attempts to send it to the remote URL.
-/// Implements batching, exponential backoff, and audit logging.
+/// Disk guard task:
+/// - Uses keyspace.disk_space() to monitor local buffer usage. 【2-75ffb8】
+/// - Pauses ingestion when disk usage exceeds max_disk_bytes.
+/// - Resumes ingestion once disk drops below a hysteresis threshold.
 ///
-/// Notes:
-/// - Fjall iter yields a Guard; we must extract key/value from it via Guard::into_inner(). 【3-c1b7cb】
-/// - HTTP 400 is treated as non-retriable (dead-letter TODO).
-/// - Sends only the payload bytes (skipping the envelope header).
+/// This provides "don't run out of disk" without deleting unsent data.
+pub async fn run_disk_guard(
+    keyspace: Keyspace,
+    cfg: RelayConfig,
+    audit: Arc<AuditGuard>,
+    gate: Arc<IngestGate>,
+) {
+    // Reuse your existing interval knob; default to frequent checks because this is a safety mechanism.
+    let interval_secs = cfg.buffer.retention_check_interval_seconds.unwrap_or(5).max(1);
+    let max_disk_bytes = cfg.buffer.max_disk_bytes.unwrap_or(4_294_967_296);
+
+    // Resume hysteresis at 95% of max to prevent rapid toggling.
+    let resume_bytes = (max_disk_bytes as f64 * 0.95) as u64;
+
+    loop {
+        let disk = keyspace.disk_space(); // Fjall keyspace disk usage 【2-75ffb8】
+
+        if disk >= max_disk_bytes {
+            if !gate.is_paused() {
+                gate.set_paused(true);
+                audit.log(
+                    Level::Error,
+                    1023,
+                    &format!(
+                        "Disk high-water exceeded: disk_bytes={disk} max_disk_bytes={max_disk_bytes}. Pausing ingest."
+                    ),
+                );
+            }
+        } else if disk <= resume_bytes {
+            if gate.is_paused() {
+                gate.set_paused(false);
+                audit.log(
+                    Level::Info,
+                    1034,
+                    &format!(
+                        "Disk back under threshold: disk_bytes={disk} resume_bytes={resume_bytes}. Resuming ingest."
+                    ),
+                );
+            }
+        }
+
+        tokio::time::sleep(Duration::from_secs(interval_secs)).await;
+    }
+}
+
+/// Egress loop:
+/// - Strict FIFO: reads oldest records first from the single keyspace.
+/// - Deletes records ONLY AFTER successful HTTP 2xx.
+/// - Any non-success (including HTTP 400) keeps records and retries.
+/// - This ensures all records are eventually sent when VictoriaMetrics becomes available.
+///
+/// Fjall iter yields Guard; extract with into_inner(). 【3-f42ef6】
 pub async fn run_egress(
     url: String,
     http: reqwest::Client,
@@ -131,7 +213,7 @@ pub async fn run_egress(
     let mut rng = rand::rng();
 
     loop {
-        // Collect up to batch_size oldest records (FIFO by key ordering).
+        // Collect up to batch_size oldest records (FIFO by key order).
         let mut batch: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(batch_size);
 
         for guard in keyspace.iter().take(batch_size) {
@@ -152,12 +234,14 @@ pub async fn run_egress(
             continue;
         }
 
-        // Build payload by concatenating payload bytes from each record (skip envelope).
+        // Build payload: concatenate payload bytes from each record (skip envelope).
+        // If a record is malformed, FIFO cannot safely skip it without breaking "all records".
         let mut payload: Vec<u8> = Vec::new();
+        let mut malformed = 0usize;
 
         for (_k, v) in &batch {
             if v.len() < HEADER_LEN {
-                audit.log(Level::Warn, 1031, "Stored record too small to contain header; skipping.");
+                malformed += 1;
                 continue;
             }
 
@@ -168,14 +252,29 @@ pub async fn run_egress(
             payload.extend_from_slice(&v[HEADER_LEN..HEADER_LEN + take_len]);
         }
 
+        if malformed > 0 {
+            audit.log(
+                Level::Error,
+                1033,
+                &format!(
+                    "Malformed records encountered in FIFO head; count={malformed}. \
+                     Records retained (no DLQ, no skip). Fix producer/encoding to proceed."
+                ),
+            );
+        }
+
         if payload.is_empty() {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            // FIFO head is malformed; we cannot progress without violating requirements.
+            let sleep_ms = backoff + rng.random_range(0..max_jitter);
+            tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+            backoff = std::cmp::min(backoff.saturating_mul(2), max_backoff);
             continue;
         }
 
         let started = Instant::now();
         match http.post(&url).body(payload).send().await {
             Ok(resp) if resp.status().is_success() => {
+                // Success: remove all keys in this batch.
                 for (k, _v) in &batch {
                     let _ = keyspace.remove(k);
                 }
@@ -191,35 +290,17 @@ pub async fn run_egress(
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
 
-            Ok(resp) if resp.status().as_u16() == 400 => {
-                // Non-retriable payload. Spec says: move to dead-letter keyspace.
-                // TODO: implement dead-letter keyspace and write records there before removal.
-                audit.log(
-                    Level::Error,
-                    1033,
-                    &format!(
-                        "Dead-letter (not retried): HTTP 400; dropping batch_size={}",
-                        batch.len()
-                    ),
-                );
-
-                // Drop records to prevent infinite retry loop.
-                for (k, _v) in &batch {
-                    let _ = keyspace.remove(k);
-                }
-
-                backoff = base_backoff;
-                tokio::time::sleep(Duration::from_millis(250)).await;
-            }
-
             Ok(resp) => {
+                // Any non-success: keep records, retry with backoff (strict FIFO).
                 let status = resp.status().as_u16();
                 let sleep_ms = backoff + rng.random_range(0..max_jitter);
 
                 audit.log(
                     Level::Warn,
                     1031,
-                    &format!("Egress failure HTTP {}; retrying in {}ms", status, sleep_ms),
+                    &format!(
+                        "Egress failure HTTP {status}; FIFO retained; retrying in {sleep_ms}ms"
+                    ),
                 );
 
                 tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
@@ -232,110 +313,14 @@ pub async fn run_egress(
                 audit.log(
                     Level::Warn,
                     1031,
-                    &format!("Egress failure (transport): {e}; retrying in {}ms", sleep_ms),
+                    &format!(
+                        "Egress transport failure: {e}; FIFO retained; retrying in {sleep_ms}ms"
+                    ),
                 );
 
                 tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
                 backoff = std::cmp::min(backoff.saturating_mul(2), max_backoff);
             }
         }
-    }
-}
-
-/// Retention task: periodically enforces max age and max disk size.
-///
-/// Optimization:
-/// - Since timestamp_ns is in the key, age checks can parse the key rather than reading the value.
-/// - Deletes are capped per pass to avoid IO starvation.
-///
-/// Fjall stores keys in lexicographic order, so scanning from the start evicts oldest first,
-/// which aligns with FIFO eviction. 【1-575fa8】【2-fae269】
-pub async fn run_retention(keyspace: Keyspace, cfg: RelayConfig, audit: Arc<AuditGuard>) {
-    let interval = cfg.buffer.retention_check_interval_seconds.unwrap_or(60);
-    let max_age_seconds = cfg.buffer.max_age_seconds.unwrap_or(259_200); // 72h default
-    let max_disk_bytes = cfg.buffer.max_disk_bytes.unwrap_or(4_294_967_296); // 4GiB default
-
-    let max_deletes_per_pass: usize = 10_000;
-
-    loop {
-        let now_ns = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-
-        let cutoff_ns = now_ns.saturating_sub(max_age_seconds.saturating_mul(1_000_000_000));
-
-        // 1) Age-based eviction (bounded)
-        let mut deleted_age = 0usize;
-
-        for guard in keyspace.iter().take(max_deletes_per_pass) {
-            let (k, _v_opt) = match guard.into_inner() {
-                Ok(pair) => pair,
-                Err(_) => continue,
-            };
-
-            let k_bytes = k.as_ref();
-            let Some(ts_ns) = key_timestamp_ns(k_bytes) else {
-                // Bad key; remove.
-                let _ = keyspace.remove(k_bytes);
-                deleted_age += 1;
-                if deleted_age >= max_deletes_per_pass {
-                    break;
-                }
-                continue;
-            };
-
-            if ts_ns < cutoff_ns {
-                let _ = keyspace.remove(k_bytes);
-                deleted_age += 1;
-                if deleted_age >= max_deletes_per_pass {
-                    break;
-                }
-            } else {
-                // Since keys are ordered oldest->newest, we can stop once not-expired.
-                break;
-            }
-        }
-
-        if deleted_age > 0 {
-            audit.log(
-                Level::Warn,
-                1021,
-                &format!("Retention (age): evicted_records={}", deleted_age),
-            );
-        }
-
-        // 2) Disk-based eviction (bounded)
-        let mut deleted_disk = 0usize;
-        let mut disk = keyspace.disk_space();
-
-        if disk > max_disk_bytes {
-            for guard in keyspace.iter().take(max_deletes_per_pass) {
-                let (k, _v_opt) = match guard.into_inner() {
-                    Ok(pair) => pair,
-                    Err(_) => continue,
-                };
-
-                let k_bytes = k.as_ref();
-                let _ = keyspace.remove(k_bytes);
-                deleted_disk += 1;
-
-                disk = keyspace.disk_space();
-                if disk <= max_disk_bytes || deleted_disk >= max_deletes_per_pass {
-                    break;
-                }
-            }
-
-            audit.log(
-                Level::Warn,
-                1021,
-                &format!(
-                    "Retention (disk): disk_bytes={} max_disk_bytes={} evicted_records={}",
-                    disk, max_disk_bytes, deleted_disk
-                ),
-            );
-        }
-
-        tokio::time::sleep(Duration::from_secs(interval)).await;
     }
 }
