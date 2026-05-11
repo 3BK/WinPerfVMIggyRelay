@@ -30,11 +30,13 @@ async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = config::load_config();
 
     // Initialize Audit Logging
-    let audit = Arc::new(audit::AuditGuard::new(&cfg.audit_source_name));
+    
+    let audit = Arc::new(audit::AuditGuard::new(&cfg.audit.audit_source_name));
     audit.log(log::Level::Info, 1000, "Relay Application Initializing with Fjall v3 storage.");
 
-    // 1. Initialize Fjall v3 Database
-    let db_path = Path::new(&cfg.metrics_queue);
+    // 1. Initialize Fjall v3 Database   
+    let db_path = Path::new(&cfg.buffer.metrics_queue);
+
     let fjall_db = Database::open(FjallConfig::new(db_path))?;
     // Use "metrics" as keyspace for spec compliance
     let items: Keyspace = fjall_db.keyspace("metrics", Default::default())?;
@@ -45,7 +47,7 @@ async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
         &cfg.tls.server_sha256_pin,
         &audit
     );
-
+    
     let http_client = reqwest::Client::builder()
         .use_preconfigured_tls(rustls_cfg)
         .build()?;
