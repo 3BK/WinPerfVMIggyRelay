@@ -1,39 +1,43 @@
-use winlog2;
-use log::Level;
+use log::{Level, info, warn, error};
+use eventlog;
 
-/// AuditGuard logs structured events to Windows Event Log.
-/// Supports custom log name, structured fields, and error handling.
+/// AuditGuard wraps Windows Event Log registration and provides structured logging.
 pub struct AuditGuard {
     source: String,
-    log_name: String,
 }
 
 impl AuditGuard {
-    pub fn new(source: &str, log_name: Option<&str>) -> Self {
-        let log = log_name.unwrap_or("Application");
-        let _ = winlog2::register(source); // Register event source
+    /// Registers the event source and initializes logging.
+    pub fn new(source: &str) -> Self {
+        // Register the event source with Windows Event Log
+        let _ = eventlog::register(source);
+        // Initialize logging to Windows Event Log at Info level (can be changed)
+        let _ = eventlog::init(source, Level::Info);
         Self {
             source: source.to_string(),
-            log_name: log.to_string(),
         }
     }
 
+    /// Logs a message with a specific level and event ID.
     pub fn log(&self, level: Level, event_id: u32, message: &str) {
-        // Log to Windows Event Viewer under specified log
-        if let Err(e) = winlog2::report(&self.source, level, event_id, &[message]) {
-            eprintln!("Audit log failure: {}", e);
+        // Use standard Rust logging macros; eventlog crate will write to Event Log
+        match level {
+            Level::Info => info!("[{}][{}] {}", event_id, self.source, message),
+            Level::Warn => warn!("[{}][{}] {}", event_id, self.source, message),
+            Level::Error => error!("[{}][{}] {}", event_id, self.source, message),
+            _ => info!("[{}][{}] {}", event_id, self.source, message),
         }
     }
 
-    /// Structured log with category and severity
+    /// Optionally, log structured fields (category, severity, etc.)
     pub fn log_structured(&self, level: Level, event_id: u32, category: &str, severity: &str, message: &str) {
-        let structured_msg = format!("[{}][{}] {}", category, severity, message);
+        let structured_msg = format!("[{}][{}][{}] {}", category, severity, event_id, message);
         self.log(level, event_id, &structured_msg);
     }
 }
 
 impl Drop for AuditGuard {
     fn drop(&mut self) {
-        // No-op for winlog2, but hooks exist for advanced cleanup
+        // No explicit deregistration needed for eventlog crate
     }
 }
