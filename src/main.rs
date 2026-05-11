@@ -40,13 +40,13 @@ async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
     let items: Keyspace = fjall_db.keyspace("metrics", Default::default())?;
 
     // 2. Setup Hardened TLS Client
-    let rustls_cfg = tls::build_rustls_config(&cfg.client_cert_sha256);
+    let rustls_cfg = tls::build_rustls_config(&cfg.tls.client_cert_sha1);
     let http_client = reqwest::Client::builder()
         .use_preconfigured_tls(rustls_cfg)
         .build()?;
 
     let audit_ingest = Arc::clone(&audit);
-    let pipe_path = cfg.named_pipe_path.clone();
+    let pipe_path = cfg.ingest.named_pipe_path.clone();
     let db_ingest = items.clone();
     let db_egress = items.clone();
 
@@ -65,7 +65,7 @@ async fn run_app() -> Result<(), Box<dyn std::error::Error>> {
 
     // 5. Run Egress Loop (batching, dead-letter, pinning, expiry check)
     relay::run_egress(
-        cfg.pingora_url,
+        cfg.forwarder.pingora_url,
         http_client,
         db_egress,
         cfg,
